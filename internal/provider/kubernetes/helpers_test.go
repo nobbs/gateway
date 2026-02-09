@@ -528,7 +528,10 @@ func TestTransformConfigMapData(t *testing.T) {
 				},
 			},
 			expected: map[string]string{
-				"unwanted-key-1": "unwanted-value-1", // first fallback key
+				"unwanted-key-1": "unwanted-value-1",
+				"unwanted-key-2": "unwanted-value-2",
+				"unwanted-key-3": "unwanted-value-3",
+				// All keys preserved when no predefined keys exist
 			},
 		},
 		{
@@ -684,7 +687,10 @@ func TestTransformSecretData(t *testing.T) {
 				},
 			},
 			expected: map[string][]byte{
-				"unwanted-key-1": []byte("unwanted-value-1"), // first key in sorted order
+				"unwanted-key-1": []byte("unwanted-value-1"),
+				"unwanted-key-2": []byte("unwanted-value-2"),
+				"unwanted-key-3": []byte("unwanted-value-3"),
+				// All keys preserved when no predefined keys exist
 			},
 		},
 		{

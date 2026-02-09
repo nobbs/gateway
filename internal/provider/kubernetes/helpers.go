@@ -204,7 +204,24 @@ func classAccepted(gc *gwapiv1.GatewayClass) bool {
 }
 
 // expectedAndFirstFallbackFilter filters a data map to only keep expected keys plus the first key for fallback.
+// If no expected keys are found in the data, all keys are preserved (e.g., for API key secrets with client IDs).
 func expectedAndFirstFallbackFilter[T any](data map[string]T, expectedKeys map[string]bool) map[string]T {
+	// Check if any expected keys exist in the data
+	hasExpectedKeys := false
+	for k := range data {
+		if expectedKeys[k] {
+			hasExpectedKeys = true
+			break
+		}
+	}
+
+	// If no expected keys found, assume all keys are needed
+	// This handles cases like API key secrets where each key is a client ID
+	if !hasExpectedKeys {
+		return data
+	}
+
+	// Otherwise, filter to keep only expected keys plus first key as fallback
 	filtered := make(map[string]T, min(len(expectedKeys)+1, len(data)))
 	firstFallbackKey := "" // to track lexicographically first key for fallback
 	for k := range data {
