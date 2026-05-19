@@ -307,7 +307,7 @@ func isTransientError(err error) bool {
 // Reconcile handles reconciling all resources in a single call. Any resource event should enqueue the
 // same reconcile.Request containing the gateway controller name. This allows multiple resource updates to
 // be handled by a single call to Reconcile. The reconcile.Request DOES NOT map to a specific resource.
-func (r *gatewayAPIReconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconcile.Result, error) {
+func (r *gatewayAPIReconciler) Reconcile(ctx context.Context, req reconcile.Request) (reconcile.Result, error) {
 	ctx, span := tracer.Start(ctx, "GatewayAPIReconciler.Reconcile")
 	defer span.End()
 	logger := r.log.WithTrace(ctx)
@@ -598,7 +598,24 @@ func (r *gatewayAPIReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 		Resources: &gwcResources,
 		Context:   ctx,
 	}
-	r.resources.GatewayAPIResources.Store(string(r.classController), resourcesWithContext)
+	key := string(r.classController)
+	previous, previousFound := r.resources.GatewayAPIResources.Load(key)
+	previousHash := ""
+	equalToPrevious := false
+	if previousFound && previous != nil {
+		previousHash = utils.DigestObject(previous.Resources)
+		equalToPrevious = resourcesWithContext.Equal(previous)
+	}
+	logger.Info("storing gateway api resources",
+		"reconcileRequest", req.NamespacedName.String(),
+		"key", key,
+		"previousFound", previousFound,
+		"equalToPrevious", equalToPrevious,
+		"previousHash", previousHash,
+		"newHash", utils.DigestObject(resourcesWithContext.Resources),
+		"summary", controllerResourcesSummary(&gwcResources),
+	)
+	r.resources.GatewayAPIResources.Store(key, resourcesWithContext)
 	message.PublishMetric(message.Metadata{
 		Runner:  string(egv1a1.LogComponentProviderRunner),
 		Message: message.ProviderResourcesMessageName,
@@ -606,6 +623,42 @@ func (r *gatewayAPIReconciler) Reconcile(ctx context.Context, _ reconcile.Reques
 
 	logger.Info("reconciled gateways successfully")
 	return reconcile.Result{}, nil
+}
+
+func controllerResourcesSummary(resources *resource.ControllerResources) []any {
+	if resources == nil {
+		return nil
+	}
+	summary := make([]any, 0, len(*resources))
+	for _, res := range *resources {
+		if res == nil {
+			continue
+		}
+		gatewayClass := ""
+		if res.GatewayClass != nil {
+			gatewayClass = res.GatewayClass.Name
+		}
+		summary = append(summary,
+			"gatewayClass", gatewayClass,
+			"gateways", len(res.Gateways),
+			"httpRoutes", len(res.HTTPRoutes),
+			"grpcRoutes", len(res.GRPCRoutes),
+			"tlsRoutes", len(res.TLSRoutes),
+			"tcpRoutes", len(res.TCPRoutes),
+			"udpRoutes", len(res.UDPRoutes),
+			"services", len(res.Services),
+			"endpointSlices", len(res.EndpointSlices),
+			"secrets", len(res.Secrets),
+			"configMaps", len(res.ConfigMaps),
+			"clientTrafficPolicies", len(res.ClientTrafficPolicies),
+			"backendTrafficPolicies", len(res.BackendTrafficPolicies),
+			"securityPolicies", len(res.SecurityPolicies),
+			"envoyExtensionPolicies", len(res.EnvoyExtensionPolicies),
+			"envoyPatchPolicies", len(res.EnvoyPatchPolicies),
+			"backends", len(res.Backends),
+		)
+	}
+	return summary
 }
 
 func (r *gatewayAPIReconciler) loadGatewayClassStatusToDelete() sets.Set[types.NamespacedName] {
@@ -2758,7 +2811,20 @@ func (r *gatewayAPIReconciler) watchResources(ctx context.Context, mgr manager.M
 	return nil
 }
 
-func (r *gatewayAPIReconciler) enqueueClass(_ context.Context, _ client.Object) []reconcile.Request {
+func (r *gatewayAPIReconciler) enqueueClass(_ context.Context, obj client.Object) []reconcile.Request {
+	if obj != nil {
+		gvk := obj.GetObjectKind().GroupVersionKind()
+		r.log.Info("enqueueing gateway api reconciliation",
+			"sourceType", fmt.Sprintf("%T", obj),
+			"sourceKind", gvk.Kind,
+			"sourceGroup", gvk.Group,
+			"sourceVersion", gvk.Version,
+			"sourceNamespace", obj.GetNamespace(),
+			"sourceName", obj.GetName(),
+			"sourceGeneration", obj.GetGeneration(),
+			"sourceResourceVersion", obj.GetResourceVersion(),
+		)
+	}
 	return []reconcile.Request{{NamespacedName: types.NamespacedName{
 		Name: string(r.classController),
 	}}}

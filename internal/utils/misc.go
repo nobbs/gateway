@@ -7,6 +7,7 @@ package utils
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -65,6 +66,17 @@ func Digest256(str string) string {
 	h := sha256.New() // Using sha256 instead of sha1 due to Blocklisted import crypto/sha1: weak cryptographic primitive (gosec)
 	h.Write([]byte(str))
 	return strings.ToLower(fmt.Sprintf("%x", h.Sum(nil)))
+}
+
+// DigestObject returns a short digest of a JSON representation of obj.
+// It is intended for diagnostics where logging the object itself may be noisy
+// or sensitive.
+func DigestObject(obj any) string {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return fmt.Sprintf("marshal-error:%T", obj)
+	}
+	return Digest256(string(b))[:12]
 }
 
 // Digest32 returns a 32-bit hash of the input string.

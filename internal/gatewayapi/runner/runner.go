@@ -299,6 +299,19 @@ func (r *Runner) subscribeAndTranslate(sub <-chan watchable.Snapshot[string, *re
 						traceLogger.Error(err, "unable to validate infra ir, skipped sending it")
 						errChan <- err
 					} else {
+						newHash := utils.DigestObject(val)
+						previousHash := ""
+						equalToPrevious := false
+						if previous, previousFound := r.InfraIR.Load(key); previousFound {
+							previousHash = utils.DigestObject(previous)
+							equalToPrevious = previousHash == newHash
+						}
+						traceLogger.Info("publishing infra ir",
+							"key", key,
+							"equalToPrevious", equalToPrevious,
+							"previousHash", previousHash,
+							"newHash", newHash,
+						)
 						r.InfraIR.Store(key, val)
 						infraIRCount++
 						// Track IR key for mark and sweep
@@ -320,6 +333,29 @@ func (r *Runner) subscribeAndTranslate(sub <-chan watchable.Snapshot[string, *re
 							XdsIR:   val,
 							Context: traceCtx,
 						}
+						httpRouteCount := 0
+						for _, listener := range val.HTTP {
+							httpRouteCount += len(listener.Routes)
+						}
+						newHash := utils.DigestObject(val)
+						previousHash := ""
+						equalToPrevious := false
+						if previous, previousFound := r.XdsIR.Load(key); previousFound {
+							previousHash = utils.DigestObject(previous.XdsIR)
+							equalToPrevious = m.Equal(previous)
+						}
+						traceLogger.Info("publishing xds ir",
+							"key", key,
+							"equalToPrevious", equalToPrevious,
+							"previousHash", previousHash,
+							"newHash", newHash,
+							"httpListeners", len(val.HTTP),
+							"httpRoutes", httpRouteCount,
+							"tcpListeners", len(val.TCP),
+							"udpListeners", len(val.UDP),
+							"envoyPatchPolicies", len(val.EnvoyPatchPolicies),
+							"extensionServerPolicies", len(val.ExtensionServerPolicies),
+						)
 						r.XdsIR.Store(key, &m)
 						xdsIRCount++
 					}

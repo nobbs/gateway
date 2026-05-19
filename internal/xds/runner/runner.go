@@ -6,12 +6,14 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
 	"math/rand"
 	"net"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
@@ -22,6 +24,7 @@ import (
 	routev3 "github.com/envoyproxy/go-control-plane/envoy/service/route/v3"
 	runtimev3 "github.com/envoyproxy/go-control-plane/envoy/service/runtime/v3"
 	secretv3 "github.com/envoyproxy/go-control-plane/envoy/service/secret/v3"
+	resourcev3 "github.com/envoyproxy/go-control-plane/pkg/resource/v3"
 	serverv3 "github.com/envoyproxy/go-control-plane/pkg/server/v3"
 	"github.com/telepresenceio/watchable"
 	"go.opentelemetry.io/otel"
@@ -38,10 +41,13 @@ import (
 	"github.com/envoyproxy/gateway/internal/infrastructure/host"
 	"github.com/envoyproxy/gateway/internal/infrastructure/kubernetes/ratelimit"
 	"github.com/envoyproxy/gateway/internal/message"
+	"github.com/envoyproxy/gateway/internal/utils"
 	"github.com/envoyproxy/gateway/internal/xds/bootstrap"
 	"github.com/envoyproxy/gateway/internal/xds/cache"
 	"github.com/envoyproxy/gateway/internal/xds/server/kubejwt"
 	"github.com/envoyproxy/gateway/internal/xds/translator"
+	xdstypes "github.com/envoyproxy/gateway/internal/xds/types"
+	xdsutils "github.com/envoyproxy/gateway/internal/xds/utils"
 )
 
 const (
@@ -90,10 +96,14 @@ type Config struct {
 
 type Runner struct {
 	Config
+	lastSnapshotDigests map[string]string
 }
 
 func New(cfg *Config) *Runner {
-	return &Runner{Config: *cfg}
+	return &Runner{
+		Config:              *cfg,
+		lastSnapshotDigests: make(map[string]string),
+	}
 }
 
 func (r *Runner) Name() string {
@@ -342,6 +352,24 @@ func (r *Runner) translateFromSubscription(sub <-chan watchable.Snapshot[string,
 							r.Logger.Error(err, "failed to init snapshot cache")
 							errChan <- err
 						} else {
+							digest, count, digestErr := xdsResourcesDigest(result.XdsResources)
+							if r.lastSnapshotDigests == nil {
+								r.lastSnapshotDigests = make(map[string]string)
+							}
+							previousDigest := r.lastSnapshotDigests[key]
+							equalToPrevious := previousDigest != "" && previousDigest == digest
+							if digestErr != nil {
+								traceLogger.Error(digestErr, "failed to digest xds resources")
+							}
+							traceLogger.Info("publishing xds snapshot",
+								"key", key,
+								"equalToPrevious", equalToPrevious,
+								"previousHash", previousDigest,
+								"newHash", digest,
+								"resourceCount", count,
+								"resourceTypes", xdsResourceTypeCounts(result.XdsResources),
+							)
+							r.lastSnapshotDigests[key] = digest
 							// Update snapshot cache
 							if err := r.cache.GenerateNewSnapshot(key, result.XdsResources, traceCtx); err != nil {
 								r.Logger.Error(err, "failed to generate a snapshot")
@@ -386,6 +414,55 @@ func (r *Runner) translateFromSubscription(sub <-chan watchable.Snapshot[string,
 		},
 	)
 	r.Logger.Info("subscriber shutting down")
+}
+
+func xdsResourcesDigest(resources xdstypes.XdsResources) (string, int, error) {
+	if resources == nil {
+		return "", 0, nil
+	}
+	resourceTypes := make([]resourcev3.Type, 0, len(resources))
+	count := 0
+	for typ, typedResources := range resources {
+		resourceTypes = append(resourceTypes, typ)
+		count += len(typedResources)
+	}
+	sort.Slice(resourceTypes, func(i, j int) bool {
+		return string(resourceTypes[i]) < string(resourceTypes[j])
+	})
+
+	var buf bytes.Buffer
+	for _, typ := range resourceTypes {
+		typeURL := string(typ)
+		typedResources := resources[typ]
+		jsonBytes, err := xdsutils.MarshalResourcesToJSON(typedResources)
+		if err != nil {
+			return "", count, err
+		}
+		buf.WriteString(typeURL)
+		buf.WriteByte('=')
+		buf.Write(jsonBytes)
+		buf.WriteByte('\n')
+	}
+	return utils.Digest256(buf.String())[:12], count, nil
+}
+
+func xdsResourceTypeCounts(resources xdstypes.XdsResources) []any {
+	if resources == nil {
+		return nil
+	}
+	resourceTypes := make([]resourcev3.Type, 0, len(resources))
+	for typ := range resources {
+		resourceTypes = append(resourceTypes, typ)
+	}
+	sort.Slice(resourceTypes, func(i, j int) bool {
+		return string(resourceTypes[i]) < string(resourceTypes[j])
+	})
+
+	counts := make([]any, 0, len(resourceTypes)*2)
+	for _, typ := range resourceTypes {
+		counts = append(counts, string(typ), len(resources[typ]))
+	}
+	return counts
 }
 
 func (r *Runner) loadTLSConfig() (*tls.Config, error) {
