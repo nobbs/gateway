@@ -7,9 +7,12 @@ package kubernetes
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
+	"sort"
 	"sync"
 	"time"
 
@@ -606,6 +609,16 @@ func (r *gatewayAPIReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 		previousHash = utils.DigestObject(previous.Resources)
 		equalToPrevious = resourcesWithContext.Equal(previous)
 	}
+	if previousFound && previous != nil && !equalToPrevious {
+		changes, truncated := controllerResourcesDigestDiff(previous.Resources, resourcesWithContext.Resources, 50)
+		logger.Info("gateway api resource digest diff",
+			"reconcileRequest", req.NamespacedName.String(),
+			"key", key,
+			"changeCount", len(changes),
+			"truncated", truncated,
+			"changes", changes,
+		)
+	}
 	logger.Info("storing gateway api resources",
 		"reconcileRequest", req.NamespacedName.String(),
 		"key", key,
@@ -623,6 +636,231 @@ func (r *gatewayAPIReconciler) Reconcile(ctx context.Context, req reconcile.Requ
 
 	logger.Info("reconciled gateways successfully")
 	return reconcile.Result{}, nil
+}
+
+type providerResourceDigest struct {
+	Kind         string `json:"kind"`
+	Namespace    string `json:"namespace,omitempty"`
+	Name         string `json:"name"`
+	FullHash     string `json:"fullHash"`
+	SemanticHash string `json:"semanticHash"`
+}
+
+type providerResourceDigestChange struct {
+	Resource             string `json:"resource"`
+	Change               string `json:"change"`
+	PreviousFullHash     string `json:"previousFullHash,omitempty"`
+	NewFullHash          string `json:"newFullHash,omitempty"`
+	PreviousSemanticHash string `json:"previousSemanticHash,omitempty"`
+	NewSemanticHash      string `json:"newSemanticHash,omitempty"`
+	FullChanged          bool   `json:"fullChanged,omitempty"`
+	SemanticChanged      bool   `json:"semanticChanged,omitempty"`
+}
+
+func controllerResourcesDigestDiff(previous, current *resource.ControllerResources, limit int) ([]providerResourceDigestChange, bool) {
+	previousDigests := controllerResourceObjectDigests(previous)
+	currentDigests := controllerResourceObjectDigests(current)
+
+	keys := sets.New[string]()
+	for key := range previousDigests {
+		keys.Insert(key)
+	}
+	for key := range currentDigests {
+		keys.Insert(key)
+	}
+
+	sortedKeys := sets.List(keys)
+	sort.Strings(sortedKeys)
+
+	changes := make([]providerResourceDigestChange, 0)
+	for _, key := range sortedKeys {
+		previousDigest, previousFound := previousDigests[key]
+		currentDigest, currentFound := currentDigests[key]
+		switch {
+		case !previousFound:
+			changes = append(changes, providerResourceDigestChange{
+				Resource:        key,
+				Change:          "added",
+				NewFullHash:     currentDigest.FullHash,
+				NewSemanticHash: currentDigest.SemanticHash,
+			})
+		case !currentFound:
+			changes = append(changes, providerResourceDigestChange{
+				Resource:             key,
+				Change:               "removed",
+				PreviousFullHash:     previousDigest.FullHash,
+				PreviousSemanticHash: previousDigest.SemanticHash,
+			})
+		case previousDigest.FullHash != currentDigest.FullHash ||
+			previousDigest.SemanticHash != currentDigest.SemanticHash:
+			changes = append(changes, providerResourceDigestChange{
+				Resource:             key,
+				Change:               "changed",
+				PreviousFullHash:     previousDigest.FullHash,
+				NewFullHash:          currentDigest.FullHash,
+				PreviousSemanticHash: previousDigest.SemanticHash,
+				NewSemanticHash:      currentDigest.SemanticHash,
+				FullChanged:          previousDigest.FullHash != currentDigest.FullHash,
+				SemanticChanged:      previousDigest.SemanticHash != currentDigest.SemanticHash,
+			})
+		}
+	}
+
+	if limit <= 0 || len(changes) <= limit {
+		return changes, false
+	}
+	return changes[:limit], true
+}
+
+func controllerResourceObjectDigests(resources *resource.ControllerResources) map[string]providerResourceDigest {
+	digests := make(map[string]providerResourceDigest)
+	if resources == nil {
+		return digests
+	}
+
+	for _, res := range *resources {
+		if res == nil {
+			continue
+		}
+
+		addProviderResourceDigest(digests, "EnvoyProxy", res.EnvoyProxyForGatewayClass)
+		for _, obj := range res.EnvoyProxiesForGateways {
+			addProviderResourceDigest(digests, "EnvoyProxy", obj)
+		}
+		addProviderResourceDigest(digests, "GatewayClass", res.GatewayClass)
+		for _, obj := range res.Gateways {
+			addProviderResourceDigest(digests, "Gateway", obj)
+		}
+		for _, obj := range res.XListenerSets {
+			addProviderResourceDigest(digests, "XListenerSet", obj)
+		}
+		for _, obj := range res.HTTPRoutes {
+			addProviderResourceDigest(digests, "HTTPRoute", obj)
+		}
+		for _, obj := range res.GRPCRoutes {
+			addProviderResourceDigest(digests, "GRPCRoute", obj)
+		}
+		for _, obj := range res.TLSRoutes {
+			addProviderResourceDigest(digests, "TLSRoute", obj)
+		}
+		for _, obj := range res.TCPRoutes {
+			addProviderResourceDigest(digests, "TCPRoute", obj)
+		}
+		for _, obj := range res.UDPRoutes {
+			addProviderResourceDigest(digests, "UDPRoute", obj)
+		}
+		for _, obj := range res.ReferenceGrants {
+			addProviderResourceDigest(digests, "ReferenceGrant", obj)
+		}
+		for _, obj := range res.Namespaces {
+			addProviderResourceDigest(digests, "Namespace", obj)
+		}
+		for _, obj := range res.Services {
+			addProviderResourceDigest(digests, "Service", obj)
+		}
+		for _, obj := range res.ServiceImports {
+			addProviderResourceDigest(digests, "ServiceImport", obj)
+		}
+		for _, obj := range res.EndpointSlices {
+			addProviderResourceDigest(digests, "EndpointSlice", obj)
+		}
+		for _, obj := range res.Secrets {
+			addProviderResourceDigest(digests, "Secret", obj)
+		}
+		for _, obj := range res.ConfigMaps {
+			addProviderResourceDigest(digests, "ConfigMap", obj)
+		}
+		for idx := range res.ExtensionRefFilters {
+			addProviderResourceDigest(digests, "ExtensionRefFilter", &res.ExtensionRefFilters[idx])
+		}
+		for _, obj := range res.EnvoyPatchPolicies {
+			addProviderResourceDigest(digests, "EnvoyPatchPolicy", obj)
+		}
+		for _, obj := range res.ClientTrafficPolicies {
+			addProviderResourceDigest(digests, "ClientTrafficPolicy", obj)
+		}
+		for _, obj := range res.BackendTrafficPolicies {
+			addProviderResourceDigest(digests, "BackendTrafficPolicy", obj)
+		}
+		for _, obj := range res.SecurityPolicies {
+			addProviderResourceDigest(digests, "SecurityPolicy", obj)
+		}
+		for _, obj := range res.BackendTLSPolicies {
+			addProviderResourceDigest(digests, "BackendTLSPolicy", obj)
+		}
+		for _, obj := range res.EnvoyExtensionPolicies {
+			addProviderResourceDigest(digests, "EnvoyExtensionPolicy", obj)
+		}
+		for idx := range res.ExtensionServerPolicies {
+			addProviderResourceDigest(digests, "ExtensionServerPolicy", &res.ExtensionServerPolicies[idx])
+		}
+		for _, obj := range res.Backends {
+			addProviderResourceDigest(digests, "Backend", obj)
+		}
+		for _, obj := range res.HTTPRouteFilters {
+			addProviderResourceDigest(digests, "HTTPRouteFilter", obj)
+		}
+		for _, obj := range res.ClusterTrustBundles {
+			addProviderResourceDigest(digests, "ClusterTrustBundle", obj)
+		}
+	}
+
+	return digests
+}
+
+func addProviderResourceDigest(digests map[string]providerResourceDigest, kind string, obj client.Object) {
+	if obj == nil || reflect.ValueOf(obj).IsNil() {
+		return
+	}
+	name := obj.GetName()
+	namespace := obj.GetNamespace()
+	key := providerResourceKey(kind, namespace, name)
+	digests[key] = providerResourceDigest{
+		Kind:         kind,
+		Namespace:    namespace,
+		Name:         name,
+		FullHash:     utils.DigestObject(obj),
+		SemanticHash: semanticProviderResourceHash(obj),
+	}
+}
+
+func providerResourceKey(kind, namespace, name string) string {
+	if namespace == "" {
+		return fmt.Sprintf("%s/%s", kind, name)
+	}
+	return fmt.Sprintf("%s/%s/%s", kind, namespace, name)
+}
+
+func semanticProviderResourceHash(obj client.Object) string {
+	b, err := json.Marshal(obj)
+	if err != nil {
+		return fmt.Sprintf("marshal-error:%T", obj)
+	}
+
+	var value map[string]any
+	if err := json.Unmarshal(b, &value); err != nil {
+		return fmt.Sprintf("unmarshal-error:%T", obj)
+	}
+
+	delete(value, "status")
+	if metadata, ok := value["metadata"].(map[string]any); ok {
+		for _, key := range []string{
+			"creationTimestamp",
+			"deletionGracePeriodSeconds",
+			"deletionTimestamp",
+			"finalizers",
+			"generation",
+			"managedFields",
+			"ownerReferences",
+			"resourceVersion",
+			"selfLink",
+			"uid",
+		} {
+			delete(metadata, key)
+		}
+	}
+
+	return utils.DigestObject(value)
 }
 
 func controllerResourcesSummary(resources *resource.ControllerResources) []any {
