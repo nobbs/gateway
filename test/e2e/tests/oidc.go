@@ -49,6 +49,10 @@ type oidcRouteTestCase struct {
 	// forwardedIDTokenHeader, when set, is the request header that EG is configured
 	// to forward the OIDC ID token on. The test verifies the upstream receives it.
 	forwardedIDTokenHeader string
+	// expectChunkedAccessToken asserts that the access token reached the client split
+	// across several cookies, i.e. tokenCookieChunking is set and the token is too
+	// large for one cookie.
+	expectChunkedAccessToken bool
 }
 
 func init() {
@@ -83,6 +87,13 @@ var OIDCTest = suite.ConformanceTest{
 				testURL:                "http://www.example.com/bar",
 				logoutURL:              "http://www.example.com/bar/logout",
 				forwardedIDTokenHeader: "X-Id-Token",
+			},
+			{
+				routeName:                "http-with-oidc-chunked",
+				securityPolicyName:       "oidc-test-chunked",
+				testURL:                  "http://www.example.com/chunked",
+				logoutURL:                "http://www.example.com/chunked/logout",
+				expectChunkedAccessToken: true,
 			},
 		}
 
@@ -282,6 +293,20 @@ func testOIDC(t *testing.T, suite *suite.ConformanceTestSuite, tc *oidcRouteTest
 	if tc.forwardedIDTokenHeader != "" {
 		require.Contains(t, strings.ToLower(string(body)), strings.ToLower(tc.forwardedIDTokenHeader),
 			"Expected the upstream to receive the forwarded ID token header %q", tc.forwardedIDTokenHeader)
+	}
+
+	// The client drops a cookie too large for a browser, so with a large access token
+	// the login above only succeeds if Envoy split the token into "<name>_0".."<name>_N-1"
+	// plus a "<name>_chunks" count cookie. Check that it did.
+	if tc.expectChunkedAccessToken {
+		chunkCount := regexp.MustCompile(`^AccessToken-.+_chunks$`)
+		firstChunk := regexp.MustCompile(`^AccessToken-.+_0$`)
+		var hasChunkCount, hasFirstChunk bool
+		for _, cookie := range oidcClient.Cookies() {
+			hasChunkCount = hasChunkCount || chunkCount.MatchString(cookie.Name)
+			hasFirstChunk = hasFirstChunk || firstChunk.MatchString(cookie.Name)
+		}
+		require.True(t, hasChunkCount && hasFirstChunk, "Expected the access token to be split across cookies")
 	}
 
 	// Verify that we can access the application without logging in again
