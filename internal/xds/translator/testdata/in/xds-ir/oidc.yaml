@@ -46,6 +46,9 @@ http:
         refreshToken: true
         defaultRefreshTokenTTL: 48h
         csrfTokenTTL: 35m
+        tokenCookieChunking:
+          maxCookieSize: 3072
+          maxChunks: 4
   - name: "second-route"
     hostname: "*"
     pathMatch:
@@ -97,6 +100,7 @@ http:
           accessToken: "CustomAccessTokenOverride"
         cookieDomain: "example.com"
         disableTokenEncryption: true
+        tokenCookieChunking: {}   # Chunking on with Envoy's default limits
         refreshToken: false
         # Forward the ID token on the Authorization header. Because this route does
         # not forward the access token, preserveAuthorizationHeader must be forced

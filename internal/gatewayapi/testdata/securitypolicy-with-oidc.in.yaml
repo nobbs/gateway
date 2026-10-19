@@ -126,6 +126,9 @@ securityPolicies:
       refreshToken: true
       defaultRefreshTokenTTL: 24h
       csrfTokenTTL: 35m
+      tokenCookieChunking:
+        maxCookieSize: 3072
+        maxChunks: 4
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: SecurityPolicy
   metadata:
@@ -158,6 +161,7 @@ securityPolicies:
       defaultRefreshTokenTTL: 48h
       cookieDomain: "example.com"
       disableTokenEncryption: true
+      tokenCookieChunking: {}   # Chunking on with Envoy's default limits
 - apiVersion: gateway.envoyproxy.io/v1alpha1
   kind: SecurityPolicy
   metadata:
